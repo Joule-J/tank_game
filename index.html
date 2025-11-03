@@ -33,7 +33,7 @@
     .swatch{width:18px;height:18px;border-radius:4px;border:1px solid rgba(255,255,255,.25);cursor:pointer;box-shadow:0 0 10px rgba(255,255,255,.08)}
     canvas{
       image-rendering:pixelated;background:linear-gradient(180deg,#02050a,#030812);
-      border-radius:18px; box-shadow:0 0 40px rgba(0,240,255,.25), inset 0 0 24px rgba(0,240,255,.06); border:1px solid rgba(0,240,255,.25)
+      border-radius:0; box-shadow:0 0 40px rgba(0,240,255,.25), inset 0 0 24px rgba(0,240,255,.06); border:1px solid rgba(0,240,255,.25)
     }
     .main{flex:1;display:flex;padding:16px}
     .stage{margin:auto;display:flex;flex-direction:column;gap:8px;align-items:center}
@@ -51,14 +51,14 @@
     <div class="brand"><span class="dot"></span> Pixel Tanks — <span style="color:var(--acc)">NEON</span></div>
 
     <div class="section">
-      <h4>Oyuncular (2-8)</h4>
+      <h4>Oyuncular (2-4)</h4>
       <div class="players" id="playersList"></div>
       <div class="row">
         <input id="newPlayerName" type="text" placeholder="Oyuncu adı" />
         <select id="newPlayerColor"></select>
         <button id="btnAddPlayer">Oyuncu Ekle</button>
       </div>
-      <p class="note">İlk iki oyuncu yerelde kontrol edilir (P1: WASD+Mouse, P2: IJKL/UO/;). Diğerleri ağ üzerinden katılabilir.</p>
+      <p class="note">İlk iki oyuncu yerelde kontrol edilir (P1: WASD+Mouse, P2: IJKL/UO/;). Diğerleri ağ ile bağlanır.</p>
     </div>
 
     <div class="section">
@@ -67,7 +67,7 @@
         <button id="btnPlay">Yerel VS</button>
         <button id="btnEditor">Harita Editörü</button>
       </div>
-      <p class="note">Çevrimiçi oynamak için WebRTC eşleştirme (kopyala‑yapıştır) kullanın.</p>
+      <p class="note">Çevrimiçi: Oda kur → kodu paylaş → oyuncular katılsın. Host cihazı sunucudur.</p>
     </div>
 
     <div class="section">
@@ -99,21 +99,26 @@
     </div>
 
     <div class="section">
-      <h4>WebRTC (manuel)</h4>
+      <h4>Online Oda</h4>
       <div class="row">
-        <button id="btnHost">Sunucu (Teklif oluştur)</button>
-        <button id="btnJoin">Misafir (Teklifi gir)</button>
+        <input id="roomName" type="text" placeholder="Oda adı" />
+        <input id="roomPass" type="text" placeholder="Şifre (opsiyonel)" />
       </div>
       <div class="row">
-        <textarea id="webrtcOffer" placeholder="Teklif (Offer)"></textarea>
-        <textarea id="webrtcAnswer" placeholder="Yanıt (Answer)"></textarea>
+        <button id="btnRoomCreate">Oda Kur</button>
+        <button id="btnRoomAddGuest" class="btn-ghost">Yeni Misafir Slotu</button>
       </div>
       <div class="row">
-        <button id="btnCopyOffer" class="btn-ghost">Teklifi Kopyala</button>
-        <button id="btnSetAnswer" class="btn-ghost">Yanıtı Uygula</button>
+        <textarea id="roomOffer" placeholder="Oda Kodu (Host oluşturur)"></textarea>
+        <textarea id="roomAnswer" placeholder="Yanıt Kodu (Misafir oluşturur)"></textarea>
+      </div>
+      <div class="row">
+        <button id="btnCopyRoom" class="btn-ghost">Kodu Kopyala</button>
+        <button id="btnApplyAnswer" class="btn-ghost">Yanıtı Uygula</button>
+        <button id="btnJoinRoom" class="btn">Odaya Katıl</button>
         <button id="btnMakeAnswer" class="btn-ghost">Yanıt Oluştur</button>
       </div>
-      <p class="note">Host simülasyon yapar; misafirler giriş yollar. Her misafir bir oyuncudur.</p>
+      <p class="note">Akış: Host <b>Oda Kur</b> (ad + şifre ile anahtar oluşturur) → kodu paylaşır. Misafir <b>Odaya Katıl</b> (aynı ad+şifre) → <b>Yanıt Oluştur</b> → host <b>Yanıtı Uygula</b>. Anahtar uyuşmazsa bağlantı reddedilir.</p>
     </div>
 
   </aside>
@@ -140,6 +145,7 @@
   const now=()=>performance.now();
   function blankGrid(){return Array.from({length:ROWS},()=>Array(COLS).fill(0));}
   function copyGrid(g){return g.map(r=>r.slice())}
+  const rand=(a,b)=>Math.random()*(b-a)+a;
 
   // ======= Colors (8 seçenek) =======
   const COLORS=['#00FFA3','#00E5FF','#FF6EC7','#FFD166','#8AFF00','#FF4D88','#A78BFA','#00FFD1'];
@@ -181,9 +187,10 @@
   let editorMode=false, editorPaint=1, showGrid=true;
   let mouse={x:canvas.width/2,y:canvas.height/2,down:false};
 
-  // Networking (manual WebRTC)
+  // Networking (oda/host)
   let role='solo'; // 'host' | 'guest' | 'solo'
-  let pc=null, dc=null; // RTCPeerConnection, DataChannel
+  let hostPeers=[]; // [{pc,dc,slot}]
+  let guestPC=null, guestDC=null;
 
   const AMMO_MAX=5, AMMO_RELOAD_MS=2000, FIRE_CD_MS=250, RESPAWN_INV_MS=2000, RESPAWN_DELAY_MS=400, SPAWN_AMMO=3;
 
@@ -194,14 +201,45 @@
 
   function setDefaultPlayers(){
     tanks=[
-      makeTank(COLORS[0],TILE*2,TILE*2,0,'Player 1'),
-      makeTank(COLORS[1],canvas.width-TILE*2,canvas.height-TILE*2,Math.PI,'Player 2')
+      makeTank(COLORS[0], TILE*2, TILE*2, 0, 'Player 1'),
+      makeTank(COLORS[1], canvas.width-TILE*2, canvas.height-TILE*2, Math.PI, 'Player 2')
     ];
     score=[0,0];
   }
 
+  // ==== SPAWN LOGIC (rastgele & birbirinden uzak) ====
+  function freeTiles(){
+    const arr=[];
+    for(let y=1;y<ROWS-1;y++){
+      for(let x=1;x<COLS-1;x++){
+        if(grid[y][x]!==1){
+          let ok=true; for(let yy=y-1;yy<=y+1;yy++){ for(let xx=x-1;xx<=x+1;xx++){ if(grid[yy]?.[xx]===1) ok=false; }}
+          if(ok) arr.push({x:x*TILE+TILE/2, y:y*TILE+TILE/2});
+        }
+      }
+    }
+    return arr;
+  }
+  function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+  function bestSpawnFor(idx){
+    const candidates=freeTiles(); if(candidates.length===0) return {x:TILE*2,y:TILE*2};
+    const existing=tanks.filter((t,i)=>i!==idx && t && t.alive);
+    const sample=[]; for(let i=0;i<Math.min(300,candidates.length);i++){ sample.push(candidates[(Math.random()*candidates.length)|0]); }
+    const scored=sample.map(p=>({p,score:existing.length? Math.min(...existing.map(e=>dist(p,e))) : 99999}));
+    scored.sort((a,b)=>b.score-a.score);
+    const top=Math.max(1,Math.floor(scored.length*0.1));
+    const pick=scored[(Math.random()*top)|0].p;
+    return {x:pick.x,y:pick.y};
+  }
+
+  function respawnAtBest(idx){
+    const pos=bestSpawnFor(idx);
+    Object.assign(tanks[idx],{x:pos.x,y:pos.y,alive:true,spawnTimer:FIRE_CD_MS*2,invulnUntil:now()+RESPAWN_INV_MS,ammo:SPAWN_AMMO,ammoAcc:0});
+  }
+
   function addPlayerUIRow(name="Player", color=COLORS[ (Math.random()*COLORS.length)|0 ]){
     const list=document.getElementById('playersList');
+    if(list.children.length>=4){ alert('Maksimum 4 oyuncu'); return; }
     const row=document.createElement('div'); row.className='playerRow';
     const nameI=document.createElement('input'); nameI.type='text'; nameI.value=name; nameI.placeholder='Oyuncu adı';
     const colorSel=document.createElement('select');
@@ -215,27 +253,28 @@
   function rebuildPlayersFromUI(){
     const list=document.getElementById('playersList');
     const rows=[...list.querySelectorAll('.playerRow')];
-    if(rows.length<2){ while(rows.length<2){ addPlayerUIRow('Player '+(rows.length+1), COLORS[rows.length%COLORS.length]); rows.push(...list.querySelectorAll('.playerRow')); } }
-    // reset players but keep positions if possible
+    while(rows.length<2) { addPlayerUIRow('Player '+(rows.length+1), COLORS[rows.length%COLORS.length]); rows.push(...list.querySelectorAll('.playerRow')); }
+    if(rows.length>4){ while(list.children.length>4) list.removeChild(list.lastChild); }
     const old=tanks; tanks=[]; score=[];
-    rows.forEach((r,idx)=>{
+    rows.slice(0,4).forEach((r,idx)=>{
       const name=r.querySelector('input').value||('Player '+(idx+1));
       const color=r.querySelector('select').value||COLORS[idx%COLORS.length];
-      const pos = idx===0? {x:TILE*2,y:TILE*2,angle:0} : idx===1? {x:canvas.width-TILE*2,y:canvas.height-TILE*2,angle:Math.PI} : {x:(2+idx)%COLS*TILE, y:(2+idx)%ROWS*TILE, angle:0};
-      const t=makeTank(color,pos.x,pos.y,pos.angle,name);
+      const t=makeTank(color, TILE*2+idx*40, TILE*2+idx*40, 0, name);
       tanks.push(t); score.push(0);
     });
+    tanks.forEach((_,i)=>{ respawnAtBest(i); });
     updateScore(); draw();
   }
 
-  // initial players UI
   (function initPlayersUI(){ addPlayerUIRow('Player 1', COLORS[0]); addPlayerUIRow('Player 2', COLORS[1]); })();
 
   function resetGame(){
     grid=copyGrid((MAPS[currentMapName]||customMaps[currentMapName]));
     bullets=[];
-    if(document.getElementById('playersList').children.length<2){ setDefaultPlayers(); } else { rebuildPlayersFromUI(); }
-    tanks.forEach(t=>{ t.alive=true; t.invulnUntil=0; t.ammo=SPAWN_AMMO; t.ammoAcc=0; });
+    const pl=document.getElementById('playersList');
+    if(pl.children.length<2){ setDefaultPlayers(); }
+    else { rebuildPlayersFromUI(); }
+    tanks.forEach((t,i)=>{ t.alive=true; t.invulnUntil=0; t.ammo=SPAWN_AMMO; t.ammoAcc=0; const pos=bestSpawnFor(i); t.x=pos.x; t.y=pos.y; });
     updateHud();
   }
 
@@ -256,16 +295,10 @@
       owner:ownerIdx, x, y,
       vx:Math.cos(dir)*5, vy:Math.sin(dir)*5,
       bounces:0, maxB:2, alive:true,
-      // dynamic trail state
       trail:[], age:0,
-      trailMin:8, trailBase:12, trailInitial:28, // spawn: long
-      bounceBoost:0, bounceBoostMax:500, // ms
+      trailMin:8, trailBase:12, trailInitial:28,
+      bounceBoost:0, bounceBoostMax:500,
     });
-  }
-
-  function farthestCornerFrom(px,py){
-    const corners=[[TILE*2,TILE*2],[canvas.width-TILE*2,TILE*2],[TILE*2,canvas.height-TILE*2],[canvas.width-TILE*2,canvas.height-TILE*2]];
-    let best=corners[0], bd=-1; for(const c of corners){ const d=Math.hypot(px-c[0],py-c[1]); if(d>bd){bd=d; best=c} } return {x:best[0],y:best[1]};
   }
 
   function handleKill(killerIdx,victimIdx){
@@ -273,18 +306,14 @@
     if(!victim || !victim.alive) return;
     victim.alive=false; bullets.forEach(b=>{ if(b.owner===victimIdx) b.alive=false; });
     score[killerIdx] = (score[killerIdx]||0)+1; updateScore();
-    setTimeout(()=>{
-      const other=tanks[killerIdx]; const pos=farthestCornerFrom(other.x,other.y);
-      Object.assign(victim,{x:pos.x,y:pos.y,alive:true,spawnTimer:FIRE_CD_MS*2,invulnUntil:now()+RESPAWN_INV_MS,ammo:SPAWN_AMMO,ammoAcc:0});
-      updateHud();
-    }, RESPAWN_DELAY_MS);
+    setTimeout(()=>{ respawnAtBest(victimIdx); updateHud(); }, RESPAWN_DELAY_MS);
   }
 
   function update(dt){
-    if(!playing||paused) return;
-    const p1=tanks[0], p2=tanks[1];
+    if(role==='guest'){ updateHud(); return; }
+    if(!playing||paused) { updateHud(); return; }
 
-    // --- P1: WASD + Mouse aim/Left click fire
+    const p1=tanks[0];
     if(p1&&p1.alive){
       const ax=(keys.has('KeyD')?1:0)-(keys.has('KeyA')?1:0);
       const ay=(keys.has('KeyS')?1:0)-(keys.has('KeyW')?1:0);
@@ -298,40 +327,37 @@
       if(mouse.down && p1.spawnTimer<=0 && p1.ammo>0){ p1.spawnTimer=FIRE_CD_MS; p1.ammo--; spawnBullet(0,p1.x,p1.y,p1.turret); }
     }
 
-    // --- P2: IJKL move, U/O turret, ; fire
-    if(p2&&p2.alive){
-      const ax=(keys.has('KeyL')?1:0)-(keys.has('KeyJ')?1:0);
-      const ay=(keys.has('KeyK')?1:0)-(keys.has('KeyI')?1:0);
+    for(let i=1;i<tanks.length;i++){
+      const p=tanks[i]; if(!p||!p.alive) continue;
+      const r=p._remote; let ax=0, ay=0, fire=false, aim=null;
+      if(r){
+        ax=(r.keys?.includes('KeyD')?1:0)-(r.keys?.includes('KeyA')?1:0);
+        ay=(r.keys?.includes('KeyS')?1:0)-(r.keys?.includes('KeyW')?1:0);
+        aim=r.mouse; fire=r.fire;
+      } else if(i===1){
+        ax=(keys.has('KeyL')?1:0)-(keys.has('KeyJ')?1:0);
+        ay=(keys.has('KeyK')?1:0)-(keys.has('KeyI')?1:0);
+        if(keys.has('KeyU')) p.turret-=0.05; if(keys.has('KeyO')) p.turret+=0.05;
+        fire=keys.has('Semicolon');
+      }
       const mag=Math.hypot(ax,ay), nx=mag?ax/mag:0, ny=mag?ay/mag:0;
-      p2.vx=nx*p2.speed; p2.vy=ny*p2.speed;
-      p2.x+=p2.vx; if(aabbWall(p2.x,p2.y,p2.size).hit) p2.x-=p2.vx;
-      p2.y+=p2.vy; if(aabbWall(p2.x,p2.y,p2.size).hit) p2.y-=p2.vy;
-      if(keys.has('KeyU')) p2.turret-=0.05; if(keys.has('KeyO')) p2.turret+=0.05;
-      p2.spawnTimer=Math.max(0,p2.spawnTimer-dt);
-      if(p2.ammo<AMMO_MAX){ p2.ammoAcc+=dt; while(p2.ammo<AMMO_MAX && p2.ammoAcc>=AMMO_RELOAD_MS){ p2.ammo++; p2.ammoAcc-=AMMO_RELOAD_MS; } }
-      if(keys.has('Semicolon') && p2.spawnTimer<=0 && p2.ammo>0){ p2.spawnTimer=FIRE_CD_MS; p2.ammo--; spawnBullet(1,p2.x,p2.y,p2.turret); }
+      p.vx=nx*p.speed; p.vy=ny*p.speed;
+      p.x+=p.vx; if(aabbWall(p.x,p.y,p.size).hit) p.x-=p.vx;
+      p.y+=p.vy; if(aabbWall(p.x,p.y,p.size).hit) p.y-=p.vy;
+      if(aim){ p.turret=Math.atan2(aim.y-p.y,aim.x-p.x); }
+      p.spawnTimer=Math.max(0,p.spawnTimer-dt);
+      if(p.ammo<AMMO_MAX){ p.ammoAcc+=dt; while(p.ammo<AMMO_MAX && p.ammoAcc>=AMMO_RELOAD_MS){ p.ammo++; p.ammoAcc-=AMMO_RELOAD_MS; } }
+      if(fire && p.spawnTimer<=0 && p.ammo>0){ p.spawnTimer=FIRE_CD_MS; p.ammo--; spawnBullet(i,p.x,p.y,p.turret); }
     }
 
-    // --- Bullets + dynamic TRON trail
     for(const b of bullets){ if(!b.alive) continue;
-      // age & dynamic trail target length
       b.age += dt;
-      const t = Math.min(1, Math.max(0, b.age/900)); // 0..1 over 0.9s
+      const t = Math.min(1, Math.max(0, b.age/900));
       const easeOut = 1 - (1 - t) * (1 - t);
-      let trailTarget = b.trailInitial * (1 - easeOut) + b.trailBase * easeOut; // long→short
-      if(b.bounceBoost>0){
-        const k = b.bounceBoost / b.bounceBoostMax; // 1..0
-        trailTarget += 12 * k; // bounce extend
-        b.bounceBoost -= dt;
-      }
-      // clamp target
+      let trailTarget = b.trailInitial * (1 - easeOut) + b.trailBase * easeOut;
+      if(b.bounceBoost>0){ const k=b.bounceBoost/b.bounceBoostMax; trailTarget += 12*k; b.bounceBoost -= dt; }
       trailTarget = Math.max(b.trailMin, Math.min(32, trailTarget));
-
-      // trail log (cap by current target)
-      b.trail.push({x:b.x,y:b.y});
-      while(b.trail.length > Math.floor(trailTarget)) b.trail.shift();
-
-      // move
+      b.trail.push({x:b.x,y:b.y}); while(b.trail.length > Math.floor(trailTarget)) b.trail.shift();
       b.x+=b.vx; b.y+=b.vy;
       const cx=Math.floor(b.x/TILE), cy=Math.floor(b.y/TILE);
       if(cy<0||cy>=ROWS||cx<0||cx>=COLS||grid[cy][cx]===1){
@@ -340,11 +366,8 @@
         const hitX=(cellY<0||cellY>=ROWS||cx<0||cx>=COLS||grid[cellY][cx]===1);
         const hitY=(cy<0||cy>=ROWS||cellX<0||cellX>=COLS||grid[cy][cellX]===1);
         if(hitX) b.vx*=-1; if(hitY) b.vy*=-1;
-        b.bounces++;
-        if(b.bounces>b.maxB){ b.alive=false; continue }
-        // on bounce: re-extend trail
-        b.bounceBoost = b.bounceBoostMax;
-        b.trailInitial = Math.min(30, Math.max(b.trailInitial, b.trailBase + 10));
+        b.bounces++; if(b.bounces>b.maxB){ b.alive=false; continue }
+        b.bounceBoost = b.bounceBoostMax; b.trailInitial = Math.min(30, Math.max(b.trailInitial, b.trailBase + 10));
         b.x=prevX+b.vx*0.5; b.y=prevY+b.vy*0.5;
       }
       for(let i=0;i<tanks.length;i++){
@@ -354,29 +377,22 @@
     }
     bullets=bullets.filter(b=>b.alive);
 
-    // network tick (host authoritative) — sadece ilk 2 oyuncu için basit senkron
-    if(role==='host' && dc && dc.readyState==='open' && tanks.length>=2){
-      const state={type:'state',
-        t:[0,1].map(i=>({x:tanks[i].x,y:tanks[i].y,turret:tanks[i].turret,alive:tanks[i].alive,inv:tanks[i].invulnUntil,ammo:tanks[i].ammo})),
-        s:score, n:tanks.slice(0,2).map(t=>t.name) };
-      try{ dc.send(JSON.stringify(state)); }catch{}
+    if(role==='host' && hostPeers.length){
+      const t=tanks.map(t=>({x:t.x,y:t.y,turret:t.turret,alive:t.alive,inv:t.invulnUntil,ammo:t.ammo,name:t.name,color:t.color}));
+      const msg=JSON.stringify({type:'state', t, s:score});
+      hostPeers.forEach(({dc})=>{ if(dc && dc.readyState==='open'){ try{ dc.send(msg); }catch{} } });
     }
 
     updateHud();
   }
 
-  function updateScore(){
-    const parts=tanks.map((t,i)=>`${t.name} ${score[i]||0}`).join('  •  ');
-    scoreEl.textContent=parts||'—';
-  }
+  function updateScore(){ const parts=tanks.map((t,i)=>`${t.name} ${score[i]||0}`).join('  •  '); scoreEl.textContent=parts||'—'; }
   function updateHud(){ ammoEl.textContent=`P1 Ammo: ${tanks[0]?tanks[0].ammo:0}/${AMMO_MAX}`; }
 
   function draw(){
-    // bg
     ctx.fillStyle='#03060d'; ctx.fillRect(0,0,canvas.width,canvas.height);
     for(let y=0;y<canvas.height;y+=4){ ctx.fillStyle='rgba(0,240,255,0.03)'; ctx.fillRect(0,y,canvas.width,1); }
 
-    // grid & walls
     for(let y=0;y<ROWS;y++){
       for(let x=0;x<COLS;x++){
         const px=x*TILE, py=y*TILE;
@@ -390,44 +406,35 @@
       }
     }
 
-    // bullet trails (TRON light — dynamic, pulsing)
     for(const b of bullets){
       const owner=tanks[b.owner]; const neon=owner?owner.color:'#00f0ff';
       const rgb=hexToRgb(neon);
-      // draw from oldest→newest with alpha & width modulation
       for(let i=0;i<b.trail.length-1;i++){
         const p=b.trail[i], q=b.trail[i+1];
-        const a=i/(b.trail.length-1); // 0..1 along trail
-        const pulse = 0.6 + 0.4*Math.sin((b.age/90) + i*0.3); // slight motion
-        const alpha = 0.08 + 0.28*a*pulse; // fade towards bullet
+        const a=i/(b.trail.length-1);
+        const pulse = 0.6 + 0.4*Math.sin((b.age/90) + i*0.3);
+        const alpha = 0.08 + 0.28*a*pulse;
         ctx.strokeStyle=`rgba(${rgb},${alpha})`;
-        ctx.lineWidth=1 + 2.5*(1-a)*pulse; // thicker near bullet, animates
+        ctx.lineWidth=1 + 2.5*(1-a)*pulse;
         ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(q.x,q.y); ctx.stroke();
       }
     }
 
-    // bullets cores
     for(const b of bullets){ const owner=tanks[b.owner]; const neon=owner?owner.color:'#00f0ff';
       ctx.fillStyle=`rgba(${hexToRgb(neon)},0.4)`; ctx.beginPath(); ctx.arc(b.x,b.y,6,0,Math.PI*2); ctx.fill();
       ctx.fillStyle=neon; ctx.fillRect(b.x-2,b.y-2,4,4);
     }
 
-    // tanks
     for(let idx=0; idx<tanks.length; idx++){
       const t=tanks[idx]; if(!t.alive) continue; const s=t.size; const blinking=(now()<t.invulnUntil)&&Math.floor(now()/150)%2===0;
       const neon=t.color; const glow = blinking? 'rgba(255,255,255,0.25)' : `${neon}80`;
-      // glow base
       ctx.fillStyle=glow; ctx.fillRect(t.x-s/2-4,t.y-s/2-4,s+8,s+8);
-      // core body
       ctx.fillStyle='#06101c'; ctx.fillRect(t.x-s/2,t.y-s/2,s,s);
-      // neon outline
       ctx.strokeStyle=neon; ctx.lineWidth=2; ctx.strokeRect(t.x-s/2+1,t.y-s/2+1,s-2,s-2);
-      // turret
       const tx=t.x+Math.cos(t.turret)*4, ty=t.y+Math.sin(t.turret)*4;
       ctx.fillStyle='#0e1f2e'; ctx.fillRect(tx-6,ty-6,12,12);
       ctx.strokeStyle=neon; ctx.lineWidth=2; ctx.strokeRect(tx-6,ty-6,12,12);
       ctx.strokeStyle=neon; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(t.x,t.y); ctx.lineTo(t.x+Math.cos(t.turret)*(s/2+14), t.y+Math.sin(t.turret)*(s/2+14)); ctx.stroke();
-      // name
       ctx.fillStyle=neon; ctx.font='12px monospace'; ctx.fillText(t.name, t.x-ctx.measureText(t.name).width/2, t.y - s/2 - 8);
     }
 
@@ -435,10 +442,7 @@
     if(editorMode){ ctx.fillStyle='rgba(0,240,255,.15)'; ctx.fillRect(0,0,canvas.width,20); ctx.fillStyle='#00e5ff'; ctx.font='14px monospace'; ctx.fillText('EDITÖR: Sol tık duvar, R: mod, S: kaydet, X: temizle, G: ızgara',8,14); }
   }
 
-  function hexToRgb(hex){
-    const v=hex.replace('#',''); const bigint=parseInt(v,16);
-    const r=(bigint>>16)&255, g=(bigint>>8)&255, b=bigint&255; return `${r},${g},${b}`;
-  }
+  function hexToRgb(hex){ const v=hex.replace('#',''); const bigint=parseInt(v,16); const r=(bigint>>16)&255, g=(bigint>>8)&255, b=bigint&255; return `${r},${g},${b}`; }
 
   let last=performance.now();
   function loop(t){ const dt=t-last; last=t; update(dt); draw(); requestAnimationFrame(loop); }
@@ -447,7 +451,6 @@
   // ======= Input =======
   window.addEventListener('keydown',e=>{ keys.add(e.code); if(["KeyF","Semicolon"].includes(e.code)) e.preventDefault(); if(editorMode) onEditorKey(e); });
   window.addEventListener('keyup',e=>keys.delete(e.code));
-
   const mousePos=(e)=>{ const r=canvas.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; };
   canvas.addEventListener('mousemove',e=>{ const p=mousePos(e); mouse.x=p.x; mouse.y=p.y; });
   canvas.addEventListener('mousedown',e=>{
@@ -474,11 +477,9 @@
   $('#btnResetScores').onclick=()=>{ score=score.map(()=>0); updateScore(); };
   mapSel.onchange=()=>{ currentMapName=mapSel.value; if(playing) resetGame(); else { grid=copyGrid((MAPS[currentMapName]||customMaps[currentMapName])); draw(); } };
 
-  // players UI
   const colorSelNew=document.getElementById('newPlayerColor'); COLORS.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; o.style.background=c; colorSelNew.appendChild(o); });
-  document.getElementById('btnAddPlayer').onclick=()=>{ const n=(document.getElementById('newPlayerName').value||'Player').trim(); const c=colorSelNew.value||COLORS[0]; const list=document.getElementById('playersList'); if(list.children.length>=8){ alert('Maksimum 8 oyuncu'); return; } addPlayerUIRow(n,c); rebuildPlayersFromUI(); };
+  document.getElementById('btnAddPlayer').onclick=()=>{ const n=(document.getElementById('newPlayerName').value||'Player').trim(); const c=colorSelNew.value||COLORS[0]; const list=document.getElementById('playersList'); if(list.children.length>=4){ alert('Maksimum 4 oyuncu'); return; } addPlayerUIRow(n,c); rebuildPlayersFromUI(); };
 
-  // editor hotkeys (fix: draw + status)
   const nameInput=document.getElementById('mapName');
   document.getElementById('btnSaveMap').onclick=()=>{ const name=(nameInput.value||'Özel Harita').trim(); if(!name) return; customMaps[name]=copyGrid(grid); saveCustomMaps(customMaps); currentMapName=name; rebuildMapList(); statusEl.textContent='Harita kaydedildi'; };
   document.getElementById('btnExport').onclick=()=>{ const data={name:currentMapName,grid}; const blob=new Blob([JSON.stringify(data)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(currentMapName||'map')+'.json'; a.click(); };
@@ -496,43 +497,85 @@
   function init(){ rebuildMapList(); statusEl.textContent='Yerel VS'; resetGame(); updateScore(); draw(); }
   init();
 
-  // ======= WebRTC (manual) =======
-  const offerTA=document.getElementById('webrtcOffer');
-  const answerTA=document.getElementById('webrtcAnswer');
-  document.getElementById('btnHost').onclick=async()=>{
-    role='host'; statusEl.textContent='Host: teklif oluşturuluyor...';
-    pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-    dc=pc.createDataChannel('ptanks'); wireDataChannel();
-    pc.onicecandidate=e=>{ if(!e.candidate){ offerTA.value=JSON.stringify(pc.localDescription); statusEl.textContent='Host: Teklif hazır; misafire gönderin.'; } };
+  // ======= ODA / WebRTC (çoklu misafir, host authoritative) =======
+  const roomOfferTA=document.getElementById('roomOffer');
+  const roomAnswerTA=document.getElementById('roomAnswer');
+  const roomNameI=document.getElementById('roomName');
+  const roomPassI=document.getElementById('roomPass');
+
+  let ROOM_NAME='', ROOM_PASS='', ROOM_KEY='';
+  function djb2(str){ let h=5381; for(let i=0;i<str.length;i++){ h=((h<<5)+h) + str.charCodeAt(i); h|=0; } return (h>>>0).toString(16); }
+  function computeRoomKey(name,pass){ return djb2((name||'')+'#'+(pass||'')); }
+
+  async function createHostPeer(){
+    if(hostPeers.length>=3){ alert('Maksimum 3 misafir (toplam 4 oyuncu)'); return null; }
+    const slot = 1 + hostPeers.length; // 1..3 (P2..P4)
+    const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    const dc=pc.createDataChannel('ptanks');
+    dc.onopen=()=>{ statusEl.textContent='Host: Misafir bağlandı (slot '+(slot+1)+')'; };
+    dc.onmessage=(ev)=>{ try{ const msg=JSON.parse(ev.data); if(msg.type==='input'){ if(tanks[slot]) tanks[slot]._remote=msg; } }catch{} };
+    pc.onicecandidate=e=>{ if(!e.candidate){
+      const payload={ desc: pc.localDescription, key: ROOM_KEY, name: ROOM_NAME, slot };
+      roomOfferTA.value=btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      statusEl.textContent='Oda Kodu hazır (slot '+(slot+1)+')';
+    } };
     const offer=await pc.createOffer(); await pc.setLocalDescription(offer);
+    hostPeers.push({pc,dc,slot});
+    return {pc,dc,slot};
+  }
+
+  document.getElementById('btnRoomCreate').onclick=async()=>{
+    ROOM_NAME=(roomNameI.value||''); ROOM_PASS=(roomPassI.value||''); ROOM_KEY=computeRoomKey(ROOM_NAME,ROOM_PASS);
+    if(!ROOM_NAME){ alert('Oda adı gerekli'); return; }
+    role='host'; statusEl.textContent='Host: Oda kuruluyor...'; await createHostPeer(); };
+
+  document.getElementById('btnRoomAddGuest').onclick=async()=>{ if(role!=='host') { alert('Önce Oda Kur'); return; } await createHostPeer(); };
+  document.getElementById('btnCopyRoom').onclick=()=>{ roomOfferTA.select(); document.execCommand('copy'); };
+  document.getElementById('btnApplyAnswer').onclick=async()=>{
+    if(role!=='host'){ alert('Host değilsiniz'); return; }
+    const ansStr=roomAnswerTA.value.trim(); if(!ansStr) return;
+    try{
+      const wrapper=JSON.parse(decodeURIComponent(escape(atob(ansStr))));
+      if(wrapper.key!==ROOM_KEY){ alert('Yanıt bu odaya ait değil (anahtar uyuşmuyor)'); return; }
+      const target=hostPeers[hostPeers.length-1];
+      await target.pc.setRemoteDescription(wrapper.desc);
+      statusEl.textContent='Host: Yanıt uygulandı';
+    }catch{ alert('Yanıt Kodu geçersiz'); }
   };
-  document.getElementById('btnCopyOffer').onclick=()=>{ offerTA.select(); document.execCommand('copy'); };
-  document.getElementById('btnSetAnswer').onclick=async()=>{
-    if(!pc) return; try{ const ans=JSON.parse(answerTA.value); await pc.setRemoteDescription(ans); statusEl.textContent='Host: Yanıt uygulandı, bağlanıyor...'; }catch(err){ alert('Yanıt JSON değil'); }
-  };
-  document.getElementById('btnJoin').onclick=async()=>{
-    role='guest'; statusEl.textContent='Misafir: Teklifi yapıştırın ve Yanıt oluşturun';
-    pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-    pc.ondatachannel=e=>{ dc=e.channel; wireDataChannel(); };
-    pc.onicecandidate=e=>{ if(!e.candidate){ answerTA.value=JSON.stringify(pc.localDescription); statusEl.textContent='Misafir: Yanıt hazır; hosta gönderin.'; } };
-  };
+
+  document.getElementById('btnJoinRoom').onclick=()=>{ role='guest'; statusEl.textContent='Misafir: Oda adı + şifre girin; Oda Kodunu yapıştırın, Yanıt oluşturun.'; };
   document.getElementById('btnMakeAnswer').onclick=async()=>{
-    if(!pc) return; try{ const off=JSON.parse(offerTA.value); await pc.setRemoteDescription(off); const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); }catch(err){ alert('Teklif JSON değil'); }
+    if(role!=='guest'){ alert('Önce Odaya Katıl'); return; }
+    try{
+      const offerStr=roomOfferTA.value.trim(); if(!offerStr) return;
+      const offerWrap=JSON.parse(decodeURIComponent(escape(atob(offerStr))));
+      const gName=(roomNameI.value||''); const gPass=(roomPassI.value||''); const gKey=computeRoomKey(gName,gPass);
+      if(!gName){ alert('Oda adı girin'); return; }
+      if(offerWrap.key!==gKey){ alert('Oda adı/şifresi yanlış'); return; }
+      guestPC=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+      guestPC.ondatachannel=e=>{ guestDC=e.channel; };
+      guestPC.onicecandidate=e=>{ if(!e.candidate){
+        const payload={ desc: guestPC.localDescription, key: gKey };
+        roomAnswerTA.value=btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+        statusEl.textContent='Yanıt Kodu hazır';
+      } };
+      await guestPC.setRemoteDescription(offerWrap.desc);
+      const ans=await guestPC.createAnswer(); await guestPC.setLocalDescription(ans);
+      setInterval(()=>{ if(role==='guest' && guestDC && guestDC.readyState==='open'){ const payload={type:'input', keys:[...keys], mouse, fire:mouse.down}; try{ guestDC.send(JSON.stringify(payload)); }catch{} } }, 80);
+    }catch{ alert('Oda Kodu geçersiz'); }
   };
 
-  function wireDataChannel(){ if(!dc) return; dc.onopen=()=>{ statusEl.textContent=(role==='host'?'Host':'Misafir')+': Bağlandı'; }; dc.onmessage=(ev)=>{ try{ const msg=JSON.parse(ev.data); if(role==='host') onGuestMsg(msg); else onHostMsg(msg); }catch{} }; }
-  function onGuestMsg(msg){ if(msg.type==='input'){ const remoteIndex=1; /* basit: misafir P2 */ const p=tanks[remoteIndex]; if(p) p._remote=msg; } }
-  function onHostMsg(msg){ if(msg.type==='state' && tanks.length>=2){ const t=msg.t; Object.assign(tanks[0],{x:t[0].x,y:t[0].y,turret:t[0].turret,alive:t[0].alive,invulnUntil:t[0].inv,ammo:t[0].ammo}); Object.assign(tanks[1],{x:t[1].x,y:t[1].y,turret:t[1].turret,alive:t[1].alive,invulnUntil:t[1].inv,ammo:t[1].ammo}); score=msg.s; updateScore(); } }
-  setInterval(()=>{ if(role==='guest' && dc && dc.readyState==='open'){ const payload={type:'input', keys:[...keys], mouse, fire:mouse.down}; try{ dc.send(JSON.stringify(payload)); }catch{} } }, 80);
-
-  // ======= DEV TESTS =======
+  // ======= DEV TESTS (mevcutları koru + yenilerini ekle) =======
   (function runDevTests(){
     try{
       console.log('%c[TEST] grid boyutu','color:#00e5ff');
       console.assert(grid.length===ROWS && grid[0].length===COLS,'Grid boyutu hatalı');
 
       console.log('%c[TEST] oyuncu limiti','color:#00e5ff');
-      const list=document.getElementById('playersList'); const before=list.children.length; addPlayerUIRow('P3',COLORS[2]); addPlayerUIRow('P4',COLORS[3]); rebuildPlayersFromUI(); console.assert(tanks.length>=2,'En az 2 oyuncu yok');
+      const list=document.getElementById('playersList');
+      addPlayerUIRow('P3',COLORS[2]); addPlayerUIRow('P4',COLORS[3]); addPlayerUIRow('P5',COLORS[4]);
+      rebuildPlayersFromUI();
+      console.assert(tanks.length>=2 && tanks.length<=4,'Oyuncu sayısı 2-4 aralığında değil');
 
       console.log('%c[TEST] spawn ammo = 3','color:#00e5ff');
       resetGame(); console.assert(tanks[0].ammo===3 && tanks[1].ammo===3,'Spawn ammo 3 değil');
@@ -541,16 +584,29 @@
       const sg=showGrid; onEditorKey({code:'KeyG',preventDefault:()=>{}}); console.assert(showGrid!==sg,'Izgara değişmedi');
 
       console.log('%c[TEST] bullet trail dynamics','color:#00e5ff');
-      let prevLen;
-      resetGame(); const p=tanks[0]; p.turret=0; p.ammo=5; spawnBullet(0,p.x,p.y,p.turret);
-      for(let i=0;i<10;i++) update(16); const L0=bullets[0].trail.length; // initial long
-      for(let i=0;i<100;i++) update(16); const L1=bullets[0].trail.length; // should decay shorter
-      // simulate a bounce
-      bullets[0].x = TILE* (COLS-1); update(16); const L2=bullets[0].trail.length; // after bounce extend
+      resetGame(); let p=tanks[0]; p.turret=0; p.ammo=5; spawnBullet(0,p.x,p.y,p.turret);
+      for(let i=0;i<10;i++) update(16); const L0=bullets[0].trail.length;
+      for(let i=0;i<100;i++) update(16); const L1=bullets[0].trail.length;
+      bullets[0].x = TILE* (COLS-1); update(16); const L2=bullets[0].trail.length;
       console.assert(L0>15,'Trail should start long');
       console.assert(L1<L0,'Trail should get shorter over time');
       console.assert(L2>=L1,'Trail should extend on bounce');
-      const p1=tanks[0]; p1.turret=0; p1.ammo=5; spawnBullet(0,p1.x,p1.y,p1.turret); for(let i=0;i<10;i++) update(16); console.assert(bullets[0].trail && bullets[0].trail.length>0,'Trail oluşmadı');
+
+      console.log('%c[TEST] spawn uzaklık','color:#00e5ff');
+      resetGame();
+      let ok=true; for(let i=0;i<tanks.length;i++){ for(let j=i+1;j<tanks.length;j++){ if(Math.hypot(tanks[i].x-tanks[j].x,tanks[i].y-tanks[j].y)<TILE*6) ok=false; }}
+      console.assert(ok,'Spawnlar birbirine çok yakın');
+
+      console.log('%c[TEST] canvas köşe','color:#00e5ff');
+      console.assert(getComputedStyle(canvas).borderRadius==='0px','Canvas border-radius 0 değil');
+
+      console.log('%c[TEST] guest no simulate','color:#00e5ff');
+      const oldRole=role; role='guest'; const gx=tanks[0].x; update(1000); console.assert(tanks[0].x===gx,'Guest must not advance simulation'); role=oldRole;
+
+      console.log('%c[TEST] room key hash','color:#00e5ff');
+      const k1=computeRoomKey('oda','123'); const k2=computeRoomKey('oda','123'); const k3=computeRoomKey('oda','456');
+      console.assert(k1===k2,'Key deterministic değil');
+      console.assert(k1!==k3,'Farklı şifre farklı anahtar üretmeli');
 
     }catch(err){ console.error('Test hatası:',err); }
   })();
